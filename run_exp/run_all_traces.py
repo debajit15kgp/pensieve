@@ -18,6 +18,7 @@ ip = str(ip_data['ip'])
 ABR_ALGO = 'BB'
 PROCESS_ID = 0
 command_BB = 'python run_traces.py ' + TRACE_PATH + ' ' + ABR_ALGO + ' ' + str(PROCESS_ID) + ' ' + ip
+print(command_BB)
 
 ABR_ALGO = 'RB'
 PROCESS_ID = 1

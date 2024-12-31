@@ -12,6 +12,9 @@ import numpy as np
 import tensorflow as tf
 import time
 import a3c
+# At the beginning of the file, after imports
+import logging
+import logging.handlers
 
 
 S_INFO = 6  # bit_rate, buffer_size, rebuffering_time, bandwidth_measurement, chunk_til_video_end
@@ -37,7 +40,12 @@ SUMMARY_DIR = './results'
 LOG_FILE = './results/log'
 # in format of time_stamp bit_rate buffer_size rebuffer_time video_chunk_size download_time reward
 # NN_MODEL = None
+# NN_MODEL = '../rl_server/results/nn_model_ep_155100.ckpt'
 NN_MODEL = '../rl_server/results/pretrain_linear_reward.ckpt'
+
+# Add these at the beginning with other constants
+NETWORK_LOG_FILE = './results/network_metrics.csv'
+M_IN_B = 1000000.0
 
 # video chunk sizes
 size_video1 = [2354772, 2123065, 2177073, 2160877, 2233056, 1941625, 2157535, 2290172, 2055469, 2169201, 2173522, 2102452, 2209463, 2275376, 2005399, 2152483, 2289689, 2059512, 2220726, 2156729, 2039773, 2176469, 2221506, 2044075, 2186790, 2105231, 2395588, 1972048, 2134614, 2164140, 2113193, 2147852, 2191074, 2286761, 2307787, 2143948, 1919781, 2147467, 2133870, 2146120, 2108491, 2184571, 2121928, 2219102, 2124950, 2246506, 1961140, 2155012, 1433658]
@@ -47,6 +55,44 @@ size_video4 = [668286, 611087, 571051, 617681, 652874, 520315, 561791, 709534, 5
 size_video5 = [450283, 398865, 350812, 382355, 411561, 318564, 352642, 437162, 374758, 362795, 353220, 405134, 386351, 434409, 337059, 366214, 360831, 372963, 405596, 350713, 386472, 399894, 401853, 343800, 359903, 379700, 425781, 277716, 400396, 400508, 358218, 400322, 369834, 412837, 401088, 365161, 321064, 361565, 378327, 390680, 345516, 384505, 372093, 438281, 398987, 393804, 331053, 314107, 255954]
 size_video6 = [181801, 155580, 139857, 155432, 163442, 126289, 153295, 173849, 150710, 139105, 141840, 156148, 160746, 179801, 140051, 138313, 143509, 150616, 165384, 140881, 157671, 157812, 163927, 137654, 146754, 153938, 181901, 111155, 153605, 149029, 157421, 157488, 143881, 163444, 179328, 159914, 131610, 124011, 144254, 149991, 147968, 161857, 145210, 172312, 167025, 160064, 137507, 118421, 112270]
 
+
+
+def setup_logging(trace_file):
+    # Create results directory if it doesn't exist
+    if not os.path.exists('./results'):
+        os.makedirs('./results')
+    
+    # Setup logging
+    log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    
+    # File handler
+    file_handler = logging.FileHandler('./results/debug_RL_{}.log'.format(trace_file))
+    file_handler.setFormatter(log_formatter)
+    root_logger.addHandler(file_handler)
+    
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(log_formatter)
+    root_logger.addHandler(console_handler)
+    
+def log_network_metrics(log_path, timestamp, metrics):
+    with open(log_path, 'a') as f:
+        f.write("{},{},{},{},{},{},{},{},{},{},{},{}\n".format(
+            timestamp,
+            metrics['size'],
+            metrics['ssim_index'],
+            metrics['cwnd'],
+            metrics['in_flight'],
+            metrics['min_rtt'],
+            metrics['rtt'],
+            metrics['delivery_rate'],
+            metrics['buffer'],
+            metrics['cum_rebuf'],
+            metrics['packet_drops'],
+            metrics['packet_drop_rate']
+        ))
 
 def get_chunk_size(quality, index):
     if ( index < 0 or index > 48 ):
@@ -68,9 +114,21 @@ def make_request_handler(input_dict):
             self.s_batch = input_dict['s_batch']
             self.a_batch = input_dict['a_batch']
             self.r_batch = input_dict['r_batch']
+            # Add network metrics log file
+            self.network_log_path = './results/network_metrics_' + trace_file + '.csv'
+            # Initialize network metrics file
+            with open(self.network_log_path, 'w') as f:
+                f.write('timestamp,size,ssim_index,cwnd,in_flight,min_rtt,rtt,delivery_rate,buffer,cum_rebuf,packet_drop,packet_drop_rate\n')
             BaseHTTPRequestHandler.__init__(self, *args, **kwargs)
 
         def do_POST(self):
+            print("Received POST request from:", self.client_address)
+            print("Headers:", self.headers)
+            self.send_header('Access-Control-Allow-Origin', 'http://128.105.145.60')
+            self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+
+
             content_length = int(self.headers['Content-Length'])
             post_data = json.loads(self.rfile.read(content_length))
             print post_data
@@ -149,6 +207,24 @@ def make_request_handler(input_dict):
                         state = [np.zeros((S_INFO, S_LEN))]
                     else:
                         state = np.array(self.s_batch[-1], copy=True)
+                
+                 # Add network metrics logging
+                metrics = {
+                    'size': video_chunk_size,
+                    'ssim_index': VIDEO_BIT_RATE[post_data['lastquality']] / M_IN_K,
+                    'cwnd': post_data.get('cwnd', 0),  # Add these fields to post_data from client
+                    'in_flight': post_data.get('in_flight', 0),
+                    'min_rtt': post_data.get('min_rtt', 0),
+                    'rtt': post_data.get('rtt', video_chunk_fetch_time),
+                    'delivery_rate': float(video_chunk_size) / float(video_chunk_fetch_time) if video_chunk_fetch_time > 0 else 0,
+                    'buffer': post_data['buffer'],
+                    'cum_rebuf': post_data['RebufferTime'],
+                    'packet_drops': post_data.get('packet_drops', 0),
+                    'packet_drop_rate': post_data.get('packet_drop_rate', 0)
+                }
+                
+                # Log network metrics
+                log_network_metrics(self.network_log_path, time.time(), metrics)
 
                 # log wall_time, bit_rate, buffer_size, rebuffer_time, video_chunk_size, download_time, reward
                 self.log_file.write(str(time.time()) + '\t' +
@@ -194,6 +270,8 @@ def make_request_handler(input_dict):
                     self.s_batch.append(state)
 
         def do_GET(self):
+            print("Received GET request from:", self.client_address)
+            print("Headers:", self.headers)
             print >> sys.stderr, 'GOT REQ'
             self.send_response(200)
             #self.send_header('Cache-Control', 'Cache-Control: no-cache, no-store, must-revalidate max-age=0')
@@ -209,11 +287,9 @@ def make_request_handler(input_dict):
 
 
 def run(server_class=HTTPServer, port=8333, log_file_path=LOG_FILE):
-
     np.random.seed(RANDOM_SEED)
 
     assert len(VIDEO_BIT_RATE) == A_DIM
-
     if not os.path.exists(SUMMARY_DIR):
         os.makedirs(SUMMARY_DIR)
 
@@ -234,8 +310,7 @@ def run(server_class=HTTPServer, port=8333, log_file_path=LOG_FILE):
         if nn_model is not None:  # nn_model is the path to file
             saver.restore(sess, nn_model)
             print("Model restored.")
-
-        init_action = np.zeros(A_DIM)
+        init_action = np.zeros(A_DIM)   
         init_action[DEFAULT_QUALITY] = 1
 
         s_batch = [np.zeros((S_INFO, S_LEN))]
@@ -262,7 +337,7 @@ def run(server_class=HTTPServer, port=8333, log_file_path=LOG_FILE):
         # interface to abr_rl server
         handler_class = make_request_handler(input_dict=input_dict)
 
-        server_address = ('localhost', port)
+        server_address = ('0.0.0.0', port)
         httpd = server_class(server_address, handler_class)
         print 'Listening on port ' + str(port)
         httpd.serve_forever()
@@ -271,12 +346,15 @@ def run(server_class=HTTPServer, port=8333, log_file_path=LOG_FILE):
 def main():
     if len(sys.argv) == 2:
         trace_file = sys.argv[1]
+        logging.info("Starting RL server with trace file: %s", trace_file)
         run(log_file_path=LOG_FILE + '_RL_' + trace_file)
     else:
         run()
 
 
 if __name__ == "__main__":
+    trace_file = sys.argv[1]
+    setup_logging(trace_file)
     try:
         main()
     except KeyboardInterrupt:

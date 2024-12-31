@@ -37,3 +37,29 @@ This script will run all schemes (buffer-based, rate-based, Festive, BOLA, fastM
 python run_exp.py
 ```
 The results will be saved to `real_exp/results` folder. More details can be found in `real_exp/README.md`.
+
+### Updated instructions to run mahimahi
+
+Please install this version of pip before running setup.py in pensieve home directory
+```
+python -m pip install "pip<21.0"
+python setup.py
+```
+
+We need to install the following packages with these versions
+```
+pip install selenium==2.53.0
+pip install pyvirtualdisplay==0.2.5
+pip install easyprocess==0.3
+```
+
+Now we need to install the chrome version 76.0.3800.2 from here `https://vikyd.github.io/download-chromium-history-version/#/`. The commands to install it are 
+```
+unzip chrome-linux.zip
+sudo mkdir -p /opt/chromium
+sudo cp -r chrome-linux/* /opt/chromium/
+sudo chmod -R 755 /opt/chromium
+sudo ln -s /opt/chromium/chrome /usr/bin/chromium
+```
+Now you should be able to check the version using `chromium --version` or `/opt/chromium/chrome --version`
+

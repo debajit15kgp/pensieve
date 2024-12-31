@@ -242,6 +242,169 @@ class Environment:
 		next_video_chunk_sizes = self.video_sizes[self.video_idx][self.chunk_idx]
 		bitrate_mask = self.video_masks[self.video_idx]
 
+		return delay, sleep_time, return_buffer_size / MILLISECONDS_IN_SECOND, rebuf / MILLISECONDS_IN_SECOND,video_chunk_size,end_of_video,video_chunk_remain,video_num_chunks,next_video_chunk_sizes,bitrate_mask
+
+	def get_video_chunk_testing(self, quality):
+		assert quality >= 0
+		assert quality < self.video_num_bitrates[self.video_idx]
+
+		video_chunk_size = self.video_sizes[self.video_idx][self.chunk_idx][quality] * B_IN_MB  # in bytes
+		
+		# use the delivery opportunity in mahimahi
+		delay = 0.0  # in ms
+		video_chunk_counter_sent = 0  # in bytes
+		
+		# Initialize metrics collection
+		throughput_all = []
+		time_stamp = 0
+		rtt_samples = []
+		cwnd = []
+		in_flight = []
+		delivery_rate = []
+
+		# Add packet tracking
+		packet_drops = 0
+		total_packets = 0
+		outstanding_packets = 0
+		current_cwnd = PACKET_SIZE  # Initial cwnd size in bytes
+		
+		while True:  # download video chunk over mahimahi
+			throughput = self.cooked_bw[self.mahimahi_ptr] \
+						* B_IN_MB / BITS_IN_BYTE
+			duration = self.cooked_time[self.mahimahi_ptr] \
+					- self.last_mahimahi_time
+		
+			packet_payload = throughput * duration * PACKET_PAYLOAD_PORTION
+
+			packets_in_flight = video_chunk_counter_sent / PACKET_SIZE
+        
+			# Calculate packet drops when in-flight exceeds cwnd
+			if packets_in_flight > (current_cwnd / PACKET_SIZE):
+				dropped_packets = packets_in_flight - (current_cwnd / PACKET_SIZE)
+				packet_drops += dropped_packets
+				# TCP behavior: reduce cwnd on packet loss
+				current_cwnd = max(PACKET_SIZE, current_cwnd / 2)
+			else:
+				# TCP behavior: increase cwnd if no loss
+				current_cwnd = min(current_cwnd + PACKET_SIZE, throughput * LINK_RTT)
+			
+			total_packets = video_chunk_size / PACKET_SIZE
+
+			# Collect metrics
+			throughput_all.append(throughput)
+			time_stamp += duration * MILLISECONDS_IN_SECOND
+			rtt_samples.append(LINK_RTT)
+			current_in_flight = video_chunk_counter_sent - (throughput * duration)
+			in_flight.append(max(0, current_in_flight))
+			cwnd.append(throughput * LINK_RTT / 1000)  # Estimate CWND based on BDP
+			delivery_rate.append(throughput)
+
+			if video_chunk_counter_sent + packet_payload > video_chunk_size:
+				fractional_time = (video_chunk_size - video_chunk_counter_sent) / \
+								throughput / PACKET_PAYLOAD_PORTION
+				delay += fractional_time
+				self.last_mahimahi_time += fractional_time
+				assert(self.last_mahimahi_time <= self.cooked_time[self.mahimahi_ptr])
+				break
+
+			video_chunk_counter_sent += packet_payload
+			delay += duration
+			self.last_mahimahi_time = self.cooked_time[self.mahimahi_ptr]
+			self.mahimahi_ptr += 1
+
+			if self.mahimahi_ptr >= len(self.cooked_bw):
+				# loop back in the beginning
+				# note: trace file starts with time 0
+				self.mahimahi_ptr = 1
+				self.last_mahimahi_time = 0
+
+		delay *= MILLISECONDS_IN_SECOND
+		delay += LINK_RTT
+
+		# Calculate summary metrics
+		avg_throughput = np.mean(throughput_all) if throughput_all else 0
+		min_rtt = min(rtt_samples) if rtt_samples else LINK_RTT
+		avg_rtt = np.mean(rtt_samples) if rtt_samples else LINK_RTT
+		avg_in_flight = np.mean(in_flight) if in_flight else 0
+		avg_cwnd = np.mean(cwnd) if cwnd else 0
+		avg_delivery_rate = np.mean(delivery_rate) if delivery_rate else 0
+
+		if not self.fixed_env:
+			# add a multiplicative noise to the delay
+			delay *= np.random.uniform(NOISE_LOW, NOISE_HIGH)
+
+		# rebuffer time
+		rebuf = np.maximum(delay - self.buffer_size, 0.0)
+
+		# update the buffer
+		self.buffer_size = np.maximum(self.buffer_size - delay, 0.0)
+
+		# add in the new chunk
+		self.buffer_size += VIDEO_CHUNCK_LEN
+
+		# sleep if buffer gets too large
+		sleep_time = 0
+		if self.buffer_size > BUFFER_THRESH:
+			# exceed the buffer limit
+			# we need to skip some network bandwidth here
+			# but do not add up the delay
+			drain_buffer_time = self.buffer_size - BUFFER_THRESH
+			sleep_time = np.ceil(drain_buffer_time / DRAIN_BUFFER_SLEEP_TIME) * \
+						DRAIN_BUFFER_SLEEP_TIME
+			self.buffer_size -= sleep_time
+
+			while True:
+				duration = self.cooked_time[self.mahimahi_ptr] \
+						- self.last_mahimahi_time
+				if duration > sleep_time / MILLISECONDS_IN_SECOND:
+					self.last_mahimahi_time += sleep_time / MILLISECONDS_IN_SECOND
+					break
+				sleep_time -= duration * MILLISECONDS_IN_SECOND
+				self.last_mahimahi_time = self.cooked_time[self.mahimahi_ptr]
+				self.mahimahi_ptr += 1
+
+				if self.mahimahi_ptr >= len(self.cooked_bw):
+					# loop back in the beginning
+					# note: trace file starts with time 0
+					self.mahimahi_ptr = 1
+					self.last_mahimahi_time = 0
+
+		# the "last buffer size" return to the controller
+		return_buffer_size = self.buffer_size
+
+		self.chunk_idx += 1
+		end_of_video = False
+		if self.chunk_idx >= self.video_num_chunks[self.video_idx]:
+			end_of_video = True
+			self.buffer_size = 0
+			self.chunk_idx = 0
+
+			if self.fixed_env:
+				self.video_idx = 0  # testing on single video
+				self.trace_idx += 1
+				if self.trace_idx >= len(self.all_cooked_time):
+					self.trace_idx = 0
+			else:
+				self.video_idx = np.random.randint(self.num_videos)
+				self.trace_idx = np.random.randint(len(self.all_cooked_time))
+
+			self.cooked_time = self.all_cooked_time[self.trace_idx]
+			self.cooked_bw = self.all_cooked_bw[self.trace_idx]
+
+			if self.fixed_env:
+				self.mahimahi_ptr = 1
+			else:
+				# randomize the start point of the trace
+				# note: trace file starts with time 0
+				self.mahimahi_ptr = np.random.randint(1, len(self.cooked_bw))
+
+			self.last_mahimahi_time = self.cooked_time[self.mahimahi_ptr - 1]
+
+		video_num_chunks = self.video_num_chunks[self.video_idx]
+		video_chunk_remain = self.video_num_chunks[self.video_idx] - self.chunk_idx
+		next_video_chunk_sizes = self.video_sizes[self.video_idx][self.chunk_idx]
+		bitrate_mask = self.video_masks[self.video_idx]
+
 		return delay, \
 			sleep_time, \
 			return_buffer_size / MILLISECONDS_IN_SECOND, \
@@ -251,7 +414,15 @@ class Environment:
 			video_chunk_remain, \
 			video_num_chunks, \
 			next_video_chunk_sizes, \
-			bitrate_mask
+			bitrate_mask, \
+			avg_throughput, \
+			min_rtt, \
+			avg_rtt, \
+			avg_cwnd, \
+			avg_in_flight, \
+			avg_delivery_rate, \
+			packet_drops, \
+			total_packets
 
 
 def main():

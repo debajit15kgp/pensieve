@@ -12,7 +12,7 @@ MIN_NUM_CHUNKS = 20
 # [200, 300, 450, 750, 1200, 1850, 2850, 4300, 6000, 8000]  # Kbps
 MEAN_VIDEO_SIZE = [0.1, 0.15, 0.38, 0.6, 0.93, 1.43, 2.15, 3.25, 4.5, 6]  # MB
 STD_VIDEO_SIZE_NOISE = 0.1
-VIDEO_FOLDER = './videos/'
+VIDEO_FOLDER = './test_video/'
 
 
 np.random.seed(RANDOM_SEED)
